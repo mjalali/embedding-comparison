@@ -17,7 +17,7 @@ Feature embedding models have been widely applied to many downstream tasks acros
 
 ## Overview of SPEC
 
-![SPEC Method](./figures/SPEC_method.png)
+![SPEC Method](./SPEC_method.png)
 
 
 ## 3. Cite our work
