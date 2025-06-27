@@ -3,6 +3,8 @@
 
 paper: Towards an Explainable Comparison and Alignment of Feature Embeddings
 
+[Website](https://mjalali.github.io/SPEC), [OpenReview](https://mjalali.github.io/SPEC/)
+
 
 [Mohammad Jalai](https://mjalali.github.io/) <sup>1</sup>, Bahar Dibaei Nia <sup>2</sup>,
 [Farzan Farnia](https://www.cse.cuhk.edu.hk/people/faculty/farzan-farnia/) <sup>1</sup>
