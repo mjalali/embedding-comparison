@@ -1,0 +1,24 @@
+# requirements.txt
+
+# Data handling and manipulation
+numpy>=1.21.0
+pandas>=1.3.0
+
+# Visualization
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Machine Learning
+scikit-learn>=0.24.0
+torch>=1.9.0
+umap-learn>=0.5.0
+git+https://github.com/openai/CLIP.git
+
+# Additional utilities
+tqdm>=4.62.0
+natsort>=8.0.0
+scipy>=1.7.0
+torchvision>=0.10.0
+
+# Logging
+logging

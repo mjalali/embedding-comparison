@@ -1,6 +1,4 @@
 from os.path import dirname, exists, join
-from datetime import datetime
-import json
 import os
 import logging
 
