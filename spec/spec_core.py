@@ -29,9 +29,7 @@ class SPEC:
         return eigenvalues, eigenvectors
 
     def compute_by_covariance_matrix(self, x, y, cov_function=None, phi_x=None, phi_y=None, eta=1, method='cholesky', eps=1e-7, args=None):
-        # phi_x = cov_function(x) if phi_x is None else phi_x  # TODO check it later
-        # phi_y = cov_function(y) if phi_y is None else phi_y
-        if phi_x is None and phi_y is None and cov_function is not None:  # TODO change cov_function name
+        if phi_x is None and phi_y is None and cov_function is not None:
             phi_x = cov_function(x)
             phi_y = cov_function(y)
 

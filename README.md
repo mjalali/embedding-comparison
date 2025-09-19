@@ -42,55 +42,96 @@ The naïve eigen-solve scales as O(n³). SPEC avoids that cost: for bounded feat
 ```
 
 embedding-comparison/
-├── spec-core/       # SPEC routines: kernels, eigensolvers, visualisation
+├── spec/       # Spectral Pairwise Embedding Comparison Class
 └── spec-align/      # SPEC-align: gradient-based embedding alignment
 
 ````
----
-
-## Installation
-
-```bash
-git clone https://github.com/yourusername/embedding-comparison.git
-cd embedding-comparison
-pip install -r requirements.txt
-````
 
 ---
 
-## Quick Start: comparing two embeddings
+# 1. SPEC, Comparing two Embeddingd
 
-### 1. Load features
+This example demonstrates how to compare embedding spaces across vision backbones using **SPEC**. The script loads pre-computed features, computes covariance matrices, and visualizes the results.
 
-```python
-import numpy as np
-import torch
-from spec_core.gaussian import gaussian_covariance
-from spec_core.diffembed import DiffEmbed
+---
 
-# Each .npz holds an array of shape [N, D]
-clip = np.load('features/clip_imagenet.npz')['features']
-dino = np.load('features/dino_imagenet.npz')['features']
+## Data Preparation
+
+Prepare pre-computed features for two models you want to compare. Save them as `.npz` files containing arrays with feature vectors:
+
+You can use `spec/extract_features.py` script to do that.
+
+```
+dino_features.npz         # contains key 'dino_features'
+clip_features.npz         # contains key 'clip_features'
+```
+
+Prepare a directory of raw images (any common format like `.jpg` or `.png`) corresponding to the feature vectors. The script will glob files directly from the folder:
+
+```
+images/
+ ├── 000001.png
+ ├── 000002.png
+ ├── ...
 ```
 
 ---
 
-### 2. Choose kernel bandwidths (σ values)
+## Running SPEC
+
+The compare_embeddings.ipynb will do the following:
+
+1. Load two feature sets (e.g., DINO and CLIP).
+2. Collect image paths directly from the given folder.
+3. Create an `ImageFilesDataset`.
+4. Compute SPEC embeddings using covariance matrices.
+5. Save a scatterplot of eigenvalues (`compare_cholesky.png`).
+6. Visualize top modes via `visualize_modes_covariance`.
+
+---
+
+## Code Overview
+
+* **Load features:**
+
+```python
+dino_features = np.load('dino_features.npz')['features']
+clip_features = np.load('clip_features.npz')['features']
+```
+
+* **Load image paths:**
+
+```python
+from glob import glob
+image_paths = sorted(glob('./images/*.png'))
+```
+
+* **Dataset:**
+
+```python
+
+# If you have a list of image_paths:
+dataset = ImageFilesDataset(path='', name='dataset-name',
+                            path_files=image_paths,
+                            transform=transform,
+                            extension='png')
+
+# If you want to pass the directory of images:
+dataset = ImageFilesDataset(path='path-to-images-directory', name='dataset-name',
+                            path_files=None,
+                            transform=transform,
+                            extension='png')
+```
+
+
+* **Choose kernel bandwidths ($\sigma$ values)** 
 
 The Gaussian-kernel bandwidth σ controls how fast similarity decays with distance.
 
-* If σ is **too small**, the kernel becomes nearly diagonal; every point looks unique and clustering signals disappear.
-* If σ is **too large**, the kernel approaches a constant matrix; meaningful structure is washed out.
+* If $\sigma$ is **too small**, the kernel becomes nearly diagonal; every point looks unique and clustering signals disappear.
+* If $\sigma$ is **too large**, the kernel approaches a constant matrix; meaningful structure is washed out.
 
-**Practical procedure**
-
-1. For each embedding, pick an initial σ (for cosine-distance features a rule-of-thumb is the median pairwise distance).
-2. Compute the approximate covariance via random Fourier features (step 3 below).
-3. Plot the eigenvalues of each covariance.
-4. Adjust σ per embedding until
-
-   * their top eigenvalues are within the same order of magnitude, and
-   * the spectra decay smoothly (indicating separable clusters).
+Tips to choose $\sigma$: You can plot the spectrom of eigenvalues (plot `cov_x` or `cov_y` eigenvalues using torch.linalg.eigh) and change the $\sigma$ untill you see eigenvalues are seperated well.
 
 Example working values:
 
@@ -99,74 +140,44 @@ sigma_clip = 3.5
 sigma_dino = 25.0
 ```
 
----
 
-### 3. Compute Gaussian covariances
-
-```python
-cov_clip, _, phi_clip = gaussian_covariance(
-    torch.from_numpy(clip).float(),
-    rff_dim=2000,
-    batchsize=128,
-    sigma=sigma_clip,
-    return_features=True)
-
-cov_dino, _, phi_dino = gaussian_covariance(
-    torch.from_numpy(dino).float(),
-    rff_dim=2000,
-    batchsize=128,
-    sigma=sigma_dino,
-    return_features=True)
-```
-
-`phi_clip` and `phi_dino` are the random-Fourier features that proxy the kernels.
-
----
-
-### 4. Run SPEC
+* **Run SPEC:**
 
 ```python
-spec = DiffEmbed(sigma=0)
-eigenvalues, eigenvectors = spec.DiffEmbed_by_covariance_matrix(
-    x=clip,
-    y=dino,
-    cov_function=None,
-    phi_x=phi_clip,
-    phi_y=phi_dino,
-    eta=1)
-```
+cov_x, _, x_feature = gaussian_covariance(torch.from_numpy(dino_features).float(),
+                                          rff_dim=3000, batchsize=16,
+                                          sigma=sigma_dino, return_features=True)
 
-`eigenvalues` quantify cluster mismatches; `eigenvectors` weight the samples in each mismatched cluster.
+cov_y, _, y_feature = gaussian_covariance(torch.from_numpy(clip_features).float(),
+                                          rff_dim=3000, batchsize=16,
+                                          sigma=y_sigma, return_features=True)
 
----
-
-### 5. Visualise cluster differences
-
-```python
-from spec_core.visualize import visualize_modes_covariance
-from spec_core.dataset import ImageFilesDataset
-
-image_paths = np.load('paths/imagenet_paths.npy')
-dataset = ImageFilesDataset(path='', name='imagenet-val',
-                            path_files=image_paths)
-
-visualize_modes_covariance(
-    eigenvalues=eigenvalues,
-    eigenvectors=eigenvectors,
-    x_feature=phi_clip,
-    y_feature=phi_dino,
-    num_visual_mode=10,
-    num_samples_per_mode=20,
-    save_dir='outputs/clip_vs_dino/',
-    dataset=dataset,
-    save_file=True,
-    x=clip,
-    y=dino,
-    model_names=('CLIP', 'DINOv2')
+eigenvalues, eigenvectors = DiffEmbed.compute_by_covariance_matrix(
+    x=dino_features, y=clip_features, phi_x=x_feature, phi_y=y_feature,
+    eta=1, method='cholesky'
 )
 ```
 
-Each output montage highlights the images most responsible for a particular embedding mismatch.
+* **Plot and visualize:**
+
+```python
+plt.scatter(eigenvalues.real.cpu(),
+            [0]*eigenvalues.shape[0],
+            s=5, c='blue')
+plt.savefig('compare_cholesky.png')
+
+visualize_modes_covariance(
+    eigenvalues, eigenvectors,
+    x_feature, y_feature,
+    num_visual_mode=10,
+    save_dir='visualize_clusters/',
+    dataset=dataset,
+    num_samples_per_mode=20,
+    x=dino_features, y=clip_features,
+    model_names=('DINOv2', 'CLIP')
+)
+```
+
 
 ---
 

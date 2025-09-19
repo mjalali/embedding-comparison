@@ -754,7 +754,6 @@ def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, 
             top_eigenvector = top_eigenvector.abs() 
 
         eig_x, eig_y = top_eigenvector[:x_feature.shape[1]], top_eigenvector[x_feature.shape[1]:]
-        print(f'{len(eig_x)}, {len(eig_y)}')
 
         scores = x_feature @ eig_x + y_feature @ eig_y
         if scores.sum() < 0:

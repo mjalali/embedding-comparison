@@ -1,3 +1,5 @@
 spec/logs
 *.idea
 *__pycache__/
+spec/*.npz
+visualize_clusters/
