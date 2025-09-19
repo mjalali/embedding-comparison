@@ -1,19 +1,67 @@
-import os
-import torch
 import inspect
+import os
 from glob import glob
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans
-from sklearn.metrics import normalized_mutual_info_score, silhouette_score, pairwise_distances, adjusted_mutual_info_score
-from scipy.spatial.distance import pdist, squareform, cdist
 
-from natsort import natsorted
-from torchvision.utils import save_image
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
+import torch
+import umap
+from natsort import natsorted
+from scipy.spatial.distance import pdist, squareform, cdist
+from sklearn.cluster import KMeans
+from sklearn.manifold import TSNE
+from sklearn.metrics import normalized_mutual_info_score, silhouette_score, pairwise_distances, \
+    adjusted_mutual_info_score
+from torchvision.utils import save_image
+from tqdm import tqdm
 
+
+def cov_rff2(x, feature_dim, std, batchsize=16, presign_omeaga=None, normalise = True):
+    assert len(x.shape) == 2 # [B, dim]
+
+    x_dim = x.shape[-1]
+
+    if presign_omeaga is None:
+        omegas = torch.randn((x_dim, feature_dim), device=x.device) * (1 / std)
+    else:
+        omegas = presign_omeaga
+    product = torch.matmul(x, omegas)
+    # batched_rff_cos = torch.cos(product) # [B, feature_dim]  # Commented for more efficiency
+    # batched_rff_sin = torch.sin(product) # [B, feature_dim]
+
+    batched_rff = torch.cat([torch.cos(product), torch.sin(product)], dim=1) / np.sqrt(feature_dim) # [B, 2 * feature_dim]
+    del product  # There is no need for product after this line
+
+    batched_rff = batched_rff.unsqueeze(2) # [B, 2 * feature_dim, 1]
+    torch.cuda.empty_cache()
+    cov = torch.zeros((2 * feature_dim, 2 * feature_dim), device=x.device)
+    batch_num = (x.shape[0] // batchsize) + 1
+    i = 0
+    for batchidx in tqdm(range(batch_num)):
+        batched_rff_slice = batched_rff[batchidx*batchsize:min((batchidx+1)*batchsize, batched_rff.shape[0])] # [mini_B, 2 * feature_dim, 1]
+        cov += torch.bmm(batched_rff_slice, batched_rff_slice.transpose(1, 2)).sum(dim=0)
+        i += batched_rff_slice.shape[0]
+        torch.cuda.empty_cache()
+    cov /= x.shape[0]
+    assert i == x.shape[0]
+
+    assert cov.shape[0] == cov.shape[1] == feature_dim * 2
+    return cov, batched_rff.squeeze()
+
+
+
+def cov_rff(x, feature_dim, std, batchsize=16, normalise=True):
+    assert len(x.shape) == 2 # [B, dim]
+
+    x = x.to('cuda' if torch.cuda.is_available() else 'cpu')
+    B, D = x.shape
+    omegas = torch.randn((D, feature_dim), device=x.device) * (1 / std)
+
+    x_cov, x_feature = cov_rff2(x, feature_dim, std, batchsize=batchsize, presign_omeaga=omegas, normalise=normalise)
+
+    return x_cov, omegas, x_feature # [2 * feature_dim, 2 * feature_dim], [D, feature_dim], [B, 2 * feature_dim]
 
 
 def load_and_concatenate_all(image_folders, captions_files, image_feats_paths, text_feats_paths, img_feats_key='img_feats', txt_feats_key='txt_feats', img_format='jpg', num_imgs_per_path=None):
@@ -73,8 +121,6 @@ def entropy_q(p, q=1):
     if q == "inf":
         return -torch.log2(torch.max(p))
     return torch.log2((p_ ** q).sum()) / (1 - q)
-
-
 
 def gaussian_kernel(x, y=None, sigma=None, batchsize=256, normalize=True, device="cuda"):
     '''
@@ -166,14 +212,27 @@ def cosine_kernel(x, y=None, batchsize=256, normalize=True, device="cuda"):
 
     return total_res
 
-def cosine_covariance(x, device="cuda"):
+def cosine_features(x, device="cuda"):
+    """
+    Compute cosine normalized features for the input matrix x. (Divide each row by its L2 norm)
+    x: Input data, shape (n_samples, n_features)
+    return: Cosine normalized features, shape (n_samples, n_features)
+    """
     l2_norms = np.linalg.norm(x, axis=1, keepdims=True)
-    # Divide each row by its L2 norm
     normalized_matrix = x / l2_norms
     return torch.from_numpy(normalized_matrix).to(device)
 
 def gaussian_covariance(x, rff_dim, sigma, batchsize=256, normalize=True, device="cuda", return_features=False):
-    from algorithm_utils import cov_rff
+    """
+    Compute the Gaussian covariance matrix and Gaussian features using Random Fourier Features (RFF).
+    x: Input data, shape (n_samples, n_features)
+    rff_dim: Dimensionality of the RFF features.
+    sigma: Bandwidth parameter for the Gaussian kernel.
+    batchsize: Batch size for processing.
+    normalize: Whether to normalize the covariance matrix.
+    return_features: If True, returns covariance matrix, Random Fourier Features and Estimated Gaussian features of x.
+    return: Covariance matrix, shape (n_samples, n_samples), Random Fourier Features, shape (n_features, rff_dim), Estimated Gaussian features of x, shape (n_samples, rff_dim)
+    """
     x_cov, omegas, x_feature = cov_rff(x, rff_dim, sigma, batchsize, normalize)
     if return_features is True:
         return x_cov, omegas, x_feature
@@ -183,7 +242,6 @@ def gaussian_covariance(x, rff_dim, sigma, batchsize=256, normalize=True, device
 
 def violin_visualization(cluster_indices, x, save_path, n_clusters, points_per_cluster):
     combined_indexes = sum(cluster_indices.values(), [])
-    from sklearn.metrics import pairwise_distances
     distance_matrix = pairwise_distances(x[combined_indexes], metric='euclidean')
 
     n = x.shape[0]  # Number of vectors
@@ -200,18 +258,6 @@ def violin_visualization(cluster_indices, x, save_path, n_clusters, points_per_c
     x_scaled = x * c
 
     normalized_dist = pairwise_distances(x_scaled[combined_indexes], metric='euclidean')
-
-    # distance_matrix[distance_matrix == 0.0] = 10000
-    # min_dist = np.min(distance_matrix)
-    # distance_matrix[distance_matrix == 10000] = 0.0
-    # max_dist = np.max(distance_matrix)
-
-    # mean_dist = np.mean(distance_matrix)
-    # std_dist = np.std(distance_matrix)
-
-    # # Min-Max Normalization to [0, 1]
-    # # normalized_dist = (distance_matrix - min_dist) / (max_dist - min_dist)
-    # normalized_dist = (distance_matrix - mean_dist) / std_dist
 
     # Step 2: Compute distances from each point to its cluster center
     intra_cluster_distances = []
@@ -234,11 +280,6 @@ def violin_visualization(cluster_indices, x, save_path, n_clusters, points_per_c
             intra_cluster_means.append(np.mean(distances))
             intra_cluster_variances.append(np.var(distances))
 
-    # # [(0, 16), (16, 32), ..., (144, 160)]
-
-    # intra_cluster_means = []
-    # intra_cluster_variances = []
-    # intra_cluster_distances = []
     else:
         for start, end in cluster_ranges:
             # Extract the submatrix for the current cluster
@@ -255,8 +296,7 @@ def violin_visualization(cluster_indices, x, save_path, n_clusters, points_per_c
         print(f'cluster means: {intra_cluster_means}')
         print(f'cluster variances: {intra_cluster_variances}')
         print(f'cluster std: {np.sqrt(intra_cluster_variances)}')
-    
-    import seaborn as sns
+
     plt.figure(figsize=(12, 6))
     sns.violinplot(data=intra_cluster_distances, palette="tab10", linewidth=1.)
 
@@ -414,7 +454,6 @@ def plot_combined_violin_clusters(x, y, cluster_indices_x, cluster_indices_y, sa
         dataset_labels.extend([name_y] * len(y_intra_distances[i]))
     
     # Create DataFrame for plotting
-    import pandas as pd
     plot_data = pd.DataFrame({
         'Distance': combined_distances,
         'Cluster': cluster_labels,
@@ -586,8 +625,6 @@ def KMeans_validation(cluster_indices, x, y):
 def tsne_visulization(cluster_indices, x, y, save_dir):
     # if x is None or y is None:
     # raise ValueError("x or y can not be None when plotting T-SNE")
-    distances = {}
-    all_distances = {}
     for data_features, data_name in ((x, 'x'), (y, 'y')):
         data_points = []
         labels = []
@@ -617,43 +654,6 @@ def tsne_visulization(cluster_indices, x, y, save_dir):
         plt.savefig(os.path.join(save_dir, f'tsne_summary_{data_name}.png'), bbox_inches='tight', dpi=400)
 
 
-def pacmap_visualization(cluster_indices, x, y, save_dir):
-    # Import PaCMAP
-    from pacmap import PaCMAP
-    print('Using PacMAP')
-    
-    distances = {}
-    all_distances = {}
-    for data_features, data_name in ((x, 'x'), (y, 'y')):
-        data_points = []
-        labels = []
-        for label, idx_list in cluster_indices.items():
-            for idx in idx_list:
-                data_points.append(data_features[idx])
-                labels.append(label)
-
-        data_points = np.array(data_points)
-        labels = np.array(labels)
-        
-        # Step 2: Apply PaCMAP
-        pacmap = PaCMAP(n_components=2, n_neighbors=5, MN_ratio=1, FP_ratio=5.0) 
-        pacmap_results = pacmap.fit_transform(data_points)
-
-        # Step 3: Plot the results
-        plt.figure(figsize=(10, 8))
-        scatter = plt.scatter(pacmap_results[:, 0], pacmap_results[:, 1], c=labels, cmap='tab10', s=40)
-        cbar1 = plt.colorbar(scatter, fraction=0.05, pad=0.02)
-
-        # Add legend
-        handles, _ = scatter.legend_elements()
-        # plt.legend(handles, np.unique(labels), title="Classes")
-
-        # plt.title("PaCMAP Visualization")
-        # plt.xlabel("PaCMAP Component 1")
-        # plt.ylabel("PaCMAP Component 2")
-        plt.savefig(os.path.join(save_dir, f'pacmap_summary_{data_name}.png'), bbox_inches='tight', dpi=400)
-
-
 def umap_visualization(cluster_indices, x, y, save_dir):
     """UMAP visualization with identical interface to pacmap_visualization().
     
@@ -663,11 +663,6 @@ def umap_visualization(cluster_indices, x, y, save_dir):
         y: Second set of features (e.g., reconstructed data)
         save_dir: Directory to save plots
     """
-    import umap
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import os
-    
     print('Using UMAP')
     
     distances = {}
@@ -712,21 +707,31 @@ def umap_visualization(cluster_indices, x, y, save_dir):
         plt.close()
 
 
-def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, num_visual_mode, save_dir, dataset, absolute=False, data_type='image', num_samples_per_mode=50, plot_tsne=True, x=None, y=None, save_file=True, total_variance=True, model_names=('X', 'Y')):
+def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, num_visual_mode, save_dir, dataset,
+                               absolute=False, data_type='image', num_samples_per_mode=50, plot_tsne=True,
+                               x=None, y=None, save_file=True, model_names=('X', 'Y'), plot_violin=False):
     """
     Visualizes the top `num_visual_mode` modes.
 
     Args:
         eigenvalues: The eigenvalues of the difference matrix `DiffEmbed_by_covariance_matrix` function
         eigenvectors: The eigenvalues of the difference matrix `DiffEmbed_by_covariance_matrix` function
-        x_feature: The features of the images. In cosine similarity it is output of the `cosine_covariance`, while  in
+        x_feature: The features of the images. In cosine similarity it is output of the `cosine_features`, while  in
         gaussian covariance it is output of the `gaussian_covariance` function (RFF features)
-        y_feature: The features of the images. In cosine similarity it is output of the `cosine_covariance`, while  in
+        y_feature: The features of the images. In cosine similarity it is output of the `cosine_features`, while  in
         gaussian covariance it is output of the `gaussian_covariance` function (RFF features)
         num_visual_mode: Number of top modes to visualize
         save_dir: saving directory
         dataset: dataset of images
         absolute: consider abs of eigenvector to compute, default is False.
+        data_type: Type of the data, can be 'image' or 'text'.
+        num_samples_per_mode: Number of samples to visualize per mode
+        plot_tsne: Whether to plot T-SNE visualizations. If True it plots T-SNE and UMAP visualizations for both x and y features.
+        x: The original x features, required if `plot_tsne` is True.
+        y: The original y features, required if `plot_tsne` is True.
+        save_file: Whether to save the visualizations and summaries to files.
+        model_names: Names of the models for x and y features, used in violin plot titles.
+        plot_violin: Whether to plot violin visualizations. If True it plots violin plots for both x and y features.
 
     Returns: None
 
@@ -738,12 +743,6 @@ def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, 
     np.save(f'{save_dir}/eigenvectors.npy', eigenvectors.cpu().numpy())
     m, max_id = eigenvalues.topk(num_visual_mode)
 
-    # x_feature = cosine_covariance(x_feature)  # TODO this should be only for cosine
-    # y_feature = cosine_covariance(y_feature)
-
-    # now_time = args.current_time
-
-    # transform = []
     summary_indexes = {}
     for i in range(num_visual_mode):
 
@@ -751,18 +750,17 @@ def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, 
         if top_eigenvector.sum() < 0:
             top_eigenvector = -top_eigenvector
         
-        if absolute:  # TODO check if its ok or use .sum(), = -...
+        if absolute:
             top_eigenvector = top_eigenvector.abs() 
 
         eig_x, eig_y = top_eigenvector[:x_feature.shape[1]], top_eigenvector[x_feature.shape[1]:]
         print(f'{len(eig_x)}, {len(eig_y)}')
 
-        # scores = c_x @ eig_x + c_y @ eig_y
         scores = x_feature @ eig_x + y_feature @ eig_y
         if scores.sum() < 0:
             scores = -scores
         if data_type == 'image':
-            top_image_ids = scores.sort(descending=True)[1]  # TODO why only 1?
+            top_image_ids = scores.sort(descending=True)[1]
             save_folder_name = os.path.join(save_dir, str(i))
 
             if save_file is True:
@@ -780,11 +778,11 @@ def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, 
             if save_file is True:
                 save_image(summary, os.path.join(save_dir, f'mode={i}_summary.jpg'), nrow=4)
                 save_image(summary[:9], os.path.join(save_dir, f'mode={i}_summary_3.jpg'), nrow=3)
-                save_image(summary[:4], os.path.join(save_dir, f'mode={i}_summary_3.jpg'), nrow=2)
+                save_image(summary[:4], os.path.join(save_dir, f'mode={i}_summary_2.jpg'), nrow=2)
 
         elif data_type == 'text':
             assert type(dataset) == list
-            top_text_ids = scores.sort(descending=True)[1]  # TODO why only 1?
+            top_text_ids = scores.sort(descending=True)[1]
 
             summary = []
             summary_indexes[i] = []
@@ -796,44 +794,17 @@ def visualize_modes_covariance(eigenvalues, eigenvectors, x_feature, y_feature, 
             if save_file is True:
                 with open(os.path.join(save_dir, f'mode={i}_summary.txt'), "w") as output:
                     output.write(str('---\n---'.join(summary)))
-        
-        # elif data_type == None:
-        #     assert dataset == None
-        #     summary_indexes[i] = []
-        #     for idx in top_text_ids[:num_samples_per_mode]:
-        #         if save_file is True:
-        #             summary.append(dataset[idx])
-        #         summary_indexes[i].append(int(idx))
-        
-        # Check condition 1 and 2 of paper:
-        n = len(x_feature)
-        I = summary_indexes[i]
-        Ic = [j for j in range(n) if j not in I]  # complement of I
-
-        # Compute K1[I, Ic] and K2[I, I]
-        K1_IIc = x_feature[I] @ x_feature[Ic].T
-        K2_II = y_feature[I] @ y_feature[I].T
-
-        # Normalize by n
-        K1_IIc_normalized = K1_IIc / n
-        K2_II_normalized = K2_II / n
-
-        # Compute conditions
-        condition1 = torch.linalg.norm(K1_IIc_normalized, 'fro')  # Frobenius norm
-        condition2 = torch.linalg.norm(K2_II_normalized, 2)       # Spectral norm
-
-        print(f"Condition 1 for cluster {i} (Frobenius norm of K1[I,Ic]/n): {condition1}")
-        print(f"Condition 2 for cluster {i} (Spectral norm of K2[I,I]/n): {condition2}")
-        xi = 4 * (condition1**2 + condition2)
-        print(f"ξ = 4(ϵ₁² + ϵ₂) = {xi}")
+        else:
+            raise ValueError(f"`data_type` {data_type} is not supported. Choose from ['image', 'text'].")
 
 
     if plot_tsne is True:
         if x is None or y is None:
             raise ValueError("x or y can not be None when plotting T-SNE")
         tsne_visulization(summary_indexes, x=x, y=y, save_dir=save_dir)
-        pacmap_visualization(summary_indexes, x=x, y=y, save_dir=save_dir)
         umap_visualization(summary_indexes, x=x, y=y, save_dir=save_dir)
+
+    if plot_violin is True:
         violin_visualization(summary_indexes, x, os.path.join(save_dir, 'violin_x.png'), n_clusters=num_visual_mode, points_per_cluster=num_samples_per_mode)
         violin_visualization(summary_indexes, y, os.path.join(save_dir, 'violin_y.png'), n_clusters=num_visual_mode, points_per_cluster=num_samples_per_mode)
         plot_combined_violin_clusters(x, y, summary_indexes, summary_indexes, os.path.join(save_dir, 'violin_xy.png'), n_clusters=num_visual_mode, model_names=model_names, colors='reverse')
