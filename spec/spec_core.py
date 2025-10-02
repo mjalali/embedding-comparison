@@ -49,7 +49,7 @@ class SPEC:
         
         elif method == 'cholesky':
             # Form the symmetric PSD matrix C
-            C = torch.vstack([torch.hstack([C_11, np.sqrt(eta) * C_12]), torch.hstack([np.sqrt(eta) * C_21, C_22])])
+            C = torch.vstack([torch.hstack([C_11, np.sqrt(eta) * C_12]), torch.hstack([np.sqrt(eta) * C_21, eta * C_22])])
 
             # Construct D matrix
             D = torch.diag(torch.cat([
